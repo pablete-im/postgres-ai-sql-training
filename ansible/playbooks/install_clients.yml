@@ -1,0 +1,89 @@
+---
+- name: Install PostgreSQL Clients
+  hosts: postgres_clients
+  become: yes
+
+  tasks:
+    # --- RedHat / Rocky Linux ---
+    - name: Install PostgreSQL PGDG repository for clients (RedHat)
+      dnf:
+        name: https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+        state: present
+        disable_gpg_check: yes
+      when: ansible_os_family == 'RedHat' and inventory_hostname != '10.85.10.241'
+
+    - name: Disable built-in PostgreSQL module for clients (RedHat)
+      command: dnf -qy module disable postgresql
+      when: ansible_os_family == 'RedHat' and inventory_hostname != '10.85.10.241'
+      register: disable_pg_client_module
+      changed_when: disable_pg_client_module.rc == 0
+      ignore_errors: yes
+
+    - name: Install PostgreSQL client and GDAL (RedHat)
+      dnf:
+        name: 
+          - postgresql{{ postgresql.version }}
+          - gdal
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    # --- Debian / Ubuntu ---
+    - name: Debug APT update manually (Debian)
+      command: apt-get update
+      when: ansible_os_family == 'Debian'
+      register: apt_update_manual
+      ignore_errors: yes
+
+    - name: Print APT update error output (Debian)
+      debug:
+        var: apt_update_manual.stderr_lines
+      when: ansible_os_family == 'Debian' and apt_update_manual.failed
+
+    - name: Print APT update stdout output (Debian)
+      debug:
+        var: apt_update_manual.stdout_lines
+      when: ansible_os_family == 'Debian' and apt_update_manual.failed
+
+    - name: Ensure required dependencies for APT repository are present (Debian)
+      apt:
+        name:
+          - gnupg2
+          - wget
+          - ca-certificates
+          - apt-transport-https
+        state: present
+        # Temporarily removing update_cache to prevent failing here without seeing the debug output
+      when: ansible_os_family == 'Debian'
+
+    - name: Download PostgreSQL repository key (Debian)
+      get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: /etc/apt/trusted.gpg.d/postgresql.asc
+        mode: '0644'
+        force: true
+      when: ansible_os_family == 'Debian'
+
+    - name: Add PostgreSQL APT repository (Debian)
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/trusted.gpg.d/postgresql.asc] https://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+        state: present
+        filename: pgdg
+        # We explicitly don't update_cache here because of the broken rabbitmq repos on the system
+        update_cache: no
+      when: ansible_os_family == 'Debian'
+
+    - name: Force update APT cache ignoring broken repos (Debian)
+      command: apt-get update --allow-releaseinfo-change
+      when: ansible_os_family == 'Debian'
+      ignore_errors: yes
+
+    - name: Install PostgreSQL client and python dev libraries (Debian)
+      apt:
+        name: 
+          - postgresql-client-{{ postgresql.version }}
+          - libpq-dev
+          - python3-dev
+          - gcc
+          - gdal-bin
+        state: present
+      when: ansible_os_family == 'Debian'

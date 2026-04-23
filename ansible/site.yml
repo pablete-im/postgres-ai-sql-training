@@ -1,0 +1,6 @@
+---
+- import_playbook: playbooks/install_server.yml
+  tags: [postgres, server]
+
+- import_playbook: playbooks/install_clients.yml
+  tags: [postgres, clients]

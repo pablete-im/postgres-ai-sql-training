@@ -1,0 +1,120 @@
+---
+- name: Install PostgreSQL 18 Server and Extensions
+  hosts: postgres_server
+  become: yes
+
+  tasks:
+    - name: Install PostgreSQL PGDG repository
+      dnf:
+        name: https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+        state: present
+        disable_gpg_check: yes
+
+    - name: Disable built-in PostgreSQL module to use PGDG packages
+      command: dnf -qy module disable postgresql
+      register: disable_pg_module
+      changed_when: disable_pg_module.rc == 0
+
+    - name: Install PostgreSQL {{ postgresql.version }} server and contrib
+      dnf:
+        name:
+          - postgresql{{ postgresql.version }}-server
+          - postgresql{{ postgresql.version }}
+          - postgresql{{ postgresql.version }}-contrib
+        state: present
+
+    - name: Check if PostgreSQL is initialized
+      stat:
+        path: /var/lib/pgsql/{{ postgresql.version }}/data/PG_VERSION
+      register: pg_data
+
+    - name: Initialize PostgreSQL database
+      command: /usr/pgsql-{{ postgresql.version }}/bin/postgresql-{{ postgresql.version }}-setup initdb
+      when: not pg_data.stat.exists
+
+    - name: Configure PostgreSQL to listen on all addresses
+      lineinfile:
+        path: /var/lib/pgsql/{{ postgresql.version }}/data/postgresql.conf
+        regexp: "^#?listen_addresses\\s*=.*"
+        line: "listen_addresses = '{{ postgresql.listen_addresses }}'"
+        state: present
+      register: pg_conf
+
+    - name: Configure pg_hba.conf to allow remote connections
+      lineinfile:
+        path: /var/lib/pgsql/{{ postgresql.version }}/data/pg_hba.conf
+        line: "host    all             all             {{ postgresql.allowed_remote_cidr }}           {{ postgresql.auth_method }}"
+        insertafter: EOF
+        state: present
+      register: pg_hba
+
+    - name: Start and enable PostgreSQL service
+      systemd:
+        name: postgresql-{{ postgresql.version }}
+        state: started
+        enabled: yes
+
+    - name: Restart PostgreSQL if configuration changed
+      systemd:
+        name: postgresql-{{ postgresql.version }}
+        state: restarted
+      when: pg_conf.changed or pg_hba.changed
+
+    - name: Set postgres admin password
+      become_user: postgres
+      command: psql -c "ALTER USER {{ postgresql.admin_user }} WITH PASSWORD '{{ vault_pg_admin_password }}';"
+      changed_when: false
+
+    - name: Install EPEL repository
+      dnf:
+        name: epel-release
+        state: present
+
+    - name: Enable CRB repository (CodeReady Builder, required for some PostGIS dependencies)
+      command: dnf config-manager --set-enabled crb
+      ignore_errors: yes
+      register: crb_enable
+      changed_when: crb_enable.rc == 0
+
+    - name: Install PostGIS, pgvector, and h3 packages
+      dnf:
+        name:
+          - postgis35_{{ postgresql.version }}
+          - pgvector_{{ postgresql.version }}
+          - h3-pg_{{ postgresql.version }}
+        state: present
+
+    - name: Ensure the database exists for the extensions
+      become_user: postgres
+      command: psql -tc "SELECT 1 FROM pg_database WHERE datname = '{{ postgresql.database_name }}'"
+      register: db_exists
+      changed_when: false
+
+    - name: Create database
+      become_user: postgres
+      command: createdb {{ postgresql.database_name }}
+      when: db_exists.stdout.strip() != '1'
+
+    - name: Enable PostGIS extension
+      become_user: postgres
+      command: psql -d {{ postgresql.database_name }} -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+      register: ext_postgis
+      changed_when: "'CREATE EXTENSION' in ext_postgis.stdout"
+
+    - name: Enable pgvector extension
+      become_user: postgres
+      command: psql -d {{ postgresql.database_name }} -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      register: ext_vector
+      changed_when: "'CREATE EXTENSION' in ext_vector.stdout"
+
+    - name: Enable h3 extension
+      become_user: postgres
+      command: psql -d {{ postgresql.database_name }} -c "CREATE EXTENSION IF NOT EXISTS h3 CASCADE;"
+      register: ext_h3
+      changed_when: "'CREATE EXTENSION' in ext_h3.stdout"
+
+    - name: Create multimodal schema
+      become_user: postgres
+      command: psql -d {{ postgresql.database_name }} -c "CREATE SCHEMA IF NOT EXISTS multimodal;"
+      register: schema_creation
+      changed_when: false

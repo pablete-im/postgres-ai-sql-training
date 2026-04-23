@@ -1,0 +1,29 @@
+{
+  "points": [
+    {"name": "Traffic Accident (Point)", "lon": -3.7038, "lat": 40.4168, "color": "#ff0000"},
+    {"name": "Street Market", "lon": -3.7010, "lat": 40.4150, "color": "#00aa00"},
+    {"name": "Road Block", "lon": -3.7150, "lat": 40.4210, "color": "#00aa00"},
+    {"name": "Police Checkpoint", "lon": -3.6912, "lat": 40.4100, "color": "#00aa00"},
+    {"name": "Protest from GeoJSON", "lon": -3.6900, "lat": 40.4120, "color": "#800080"},
+    {"name": "Search Origin (Radius & KNN)", "lon": -3.7100, "lat": 40.4200, "color": "#ffa500"}
+  ],
+  "lines": [
+    {
+      "name": "Marathon Route (Line)",
+      "coordinates": [[-3.7038, 40.4168], [-3.7100, 40.4200], [-3.7150, 40.4250]],
+      "color": "#0000ff"
+    }
+  ],
+  "polygons": [
+    {
+      "name": "Restricted Zone (Polygon)",
+      "coordinates": [[[-3.70, 40.41], [-3.71, 40.41], [-3.71, 40.42], [-3.70, 40.42], [-3.70, 40.41]]],
+      "color": "#ff0000"
+    },
+    {
+      "name": "Search Area (Intersects Polygon)",
+      "coordinates": [[[-3.705, 40.415], [-3.705, 40.420], [-3.700, 40.420], [-3.700, 40.415], [-3.705, 40.415]]],
+      "color": "#ffa500"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# Ansible
+*.retry
+*.log
+ansible/.vault_pass
+ansible/.vault_pass_txt
+
+# Secrets (not committed - use vault.yml.example as template)
+ansible/inventory/group_vars/all/vault.yml
+ansible/inventory/group_vars/all/vault-original.yml
+
+
+# Python
+python/__pycache__/
+python/*.pyc
+python/.venv/
+python/venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp

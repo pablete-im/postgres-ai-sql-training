@@ -1,0 +1,7 @@
+{
+  "hexagons": [
+    {"name": "Delivery Dropoff (Center) & Search Origin", "lat": 40.4168, "lon": -3.7038, "resolution": 9, "color": "#ffa500"},
+    {"name": "Pickup (North)", "lat": 40.4500, "lon": -3.7038, "resolution": 9, "color": "#0000ff"},
+    {"name": "Delivery Dropoff (South)", "lat": 40.3800, "lon": -3.7038, "resolution": 9, "color": "#0000ff"}
+  ]
+}

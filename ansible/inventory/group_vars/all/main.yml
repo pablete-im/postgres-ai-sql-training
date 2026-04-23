@@ -1,0 +1,16 @@
+# Environment Configuration
+# Non-secret variables for the PostgreSQL environment
+
+# ===========================================
+# PostgreSQL Configuration
+# ===========================================
+postgresql:
+  version: "18"
+  database_name: "my_database"
+  admin_user: "postgres"
+  # postgresql.conf settings
+  listen_addresses: "*"
+  port: 5432
+  # pg_hba.conf settings
+  allowed_remote_cidr: "10.85.10.0/24"
+  auth_method: "scram-sha-256"

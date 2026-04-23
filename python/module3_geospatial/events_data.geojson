@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [-3.6900, 40.4120]
+      },
+      "properties": {
+        "event_type": "Protest from GeoJSON"
+      }
+    }
+  ]
+}
