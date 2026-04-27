@@ -14,6 +14,7 @@ We use the `vector(n)` data type, where `n` is the dimension of your model's out
 CREATE TABLE facial_embeddings (
     image_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     person_name TEXT,
+    metadata JSONB,
     s3_url TEXT,
     -- Storing the image tensor as a vector
     embedding vector(512)
@@ -32,9 +33,10 @@ While standard `INSERT` statements are fine for real-time inference (e.g., a use
 #### A. Real-time Single Ingestion (Standard INSERT)
 
 ```sql
-INSERT INTO facial_embeddings (person_name, s3_url, embedding) 
+INSERT INTO facial_embeddings (person_name, metadata, s3_url, embedding) 
 VALUES (
     'Alice Smith', 
+    '{"role": "admin", "department": "security"}',
     's3://bucket/faces/alice.jpg', 
     '[0.012, -0.045, 0.123, ...]' -- Array of 512 floats
 );
@@ -47,16 +49,16 @@ For millions of rows, the native `COPY` command is the fastest way to stream dat
 Example File (`faces_batch_01.csv`):
 
 ```csv
-person_name,s3_url,embedding
-"Bob Jones","s3://bucket/faces/bob.jpg","[-0.051, 0.088, 0.201, ...]"
-"Charlie Doe","s3://bucket/faces/charlie.jpg","[0.005, 0.011, -0.099, ...]"
-"Diana Prince","s3://bucket/faces/diana.jpg","[0.022, -0.015, 0.155, ...]"
+person_name,metadata,s3_url,embedding
+"Bob Jones","{""role"": ""employee"", ""department"": ""HR""}","s3://bucket/faces/bob.jpg","[-0.051, 0.088, 0.201, ...]"
+"Charlie Doe","{""role"": ""contractor"", ""department"": ""Facilities""}","s3://bucket/faces/charlie.jpg","[0.005, 0.011, -0.099, ...]"
+"Diana Prince","{""role"": ""admin"", ""department"": ""IT""}","s3://bucket/faces/diana.jpg","[0.022, -0.015, 0.155, ...]"
 ```
 
 Execution Command:
 
 ```sql
-COPY facial_embeddings (person_name, s3_url, embedding) 
+COPY facial_embeddings (person_name, metadata, s3_url, embedding) 
 FROM '/path/to/faces_batch_01.csv' 
 WITH (FORMAT csv, HEADER true);
 ```
@@ -70,13 +72,15 @@ import io
 
 # 1. Create an in-memory buffer
 csv_file = io.StringIO()
-csv_file.write("person_name,s3_url,embedding\n")
+csv_file.write("person_name,metadata,s3_url,embedding\n")
 for row in data_arrays:
-    csv_file.write(f'"{row[0]}","{row[1]}","{row[2]}"\n')
+    # Escape double quotes for CSV format
+    meta = row[1].replace('"', '""')
+    csv_file.write(f'"{row[0]}","{meta}","{row[2]}","{row[3]}"\n')
 csv_file.seek(0)
 
 # 2. Stream directly to Postgres
-cursor.copy_expert("COPY facial_embeddings (person_name, s3_url, embedding) FROM STDIN WITH (FORMAT csv, HEADER true)", csv_file)
+cursor.copy_expert("COPY facial_embeddings (person_name, metadata, s3_url, embedding) FROM STDIN WITH (FORMAT csv, HEADER true)", csv_file)
 ```
 
 ### 1.3 Exact Similarity Queries & Distance Operators
@@ -127,7 +131,30 @@ Statement Breakdown & Context:
 > **Why this matters for Production:**
 > If your vectors are normalized, you should **always use Inner Product (`<#>`) with the `vector_ip_ops` index** because it requires fewer mathematical operations than Cosine Distance, making it computationally faster at scale.
 
-### 1.4 Indexing for Production (HNSW vs IVFFlat)
+### 1.4 Hybrid search Images + JSON metadata
+
+In real-world applications, you rarely search *only* by vectors. Usually, you want to pre-filter your dataset using structured or semi-structured data (like JSON metadata) before calculating vector distances. This is known as **Pre-filtering Hybrid Search**.
+
+PostgreSQL's `JSONB` type combined with a `GIN` index allows for lightning-fast metadata filtering, which drastically reduces the number of vectors the HNSW index needs to evaluate.
+
+```sql
+-- Find the most similar faces, but ONLY for people who are 'admin'
+SELECT 
+    person_name,
+    metadata->>'department' AS department,
+    1 - (embedding <=> '[0.015, -0.042, 0.110, ...]') AS similarity_score
+FROM 
+    facial_embeddings
+WHERE 
+    metadata @> '{"role": "admin"}'
+ORDER BY 
+    embedding <=> '[0.015, -0.042, 0.110, ...]' ASC
+LIMIT 3;
+```
+
+**Execution Note**: PostgreSQL will first use the `GIN` index on the `metadata` column to quickly isolate rows where `role = admin`. Then, it will use the `HNSW` index on the `embedding` column to find the closest vectors among that filtered subset. This is significantly faster and more accurate than doing a post-filter.
+
+### 1.5 Indexing for Production (HNSW vs IVFFlat)
 
 To prevent Sequential Scans, you must index the vector column. We use HNSW for the best read performance. **Crucially, your index operator class MUST match the operator used in your `ORDER BY` clause.**
 
@@ -146,14 +173,19 @@ WITH (m = 16, ef_construction = 64);
 CREATE INDEX facial_hnsw_ip_idx 
 ON facial_embeddings USING hnsw (embedding vector_ip_ops)
 WITH (m = 16, ef_construction = 64);
+
+-- Index for JSONB Metadata filtering
+CREATE INDEX facial_metadata_idx 
+ON facial_embeddings USING GIN (metadata);
 ```
 
 Detailed Index Explanation:
 
-- `USING hnsw`: Creates a Hierarchical Navigable Small World graph.
+- `USING hnsw`: Creates a Hierarchical Navigable Small World graph, which is currently the state-of-the-art algorithm for fast approximate nearest neighbor (ANN) searches.
 - `vector_cosine_ops`: Crucial parameter. You must specify the operator class that matches your query ( `<=>` needs `vector_cosine_ops`, `<->` needs `vector_l2_ops`).
+- `USING GIN`: Generalized Inverted Index. Essential for querying inside `JSONB` objects (e.g., using the `@>` containment operator). It indexes every key and value inside the JSON document, allowing PostgreSQL to instantly find rows matching specific metadata criteria without scanning the whole table.
 
-### 1.5 Execution Instructions (Python)
+### 1.6 Execution Instructions (Python)
 
 To run the complete pipeline for this module (schema setup, bulk ingestion, and semantic queries), you can execute the provided Python script. 
 
@@ -372,7 +404,7 @@ Statement Breakdown & Indexing Details:
 
 Geospatial data rarely comes one point at a time; it usually arrives in large geographic datasets (Shapefiles, GeoJSON, KML).
 
-> 🗺️ **VISUALIZE THE DATA**: [Click here to open an interactive map](http://geojson.io/#data=data:application/json,%7B%22type%22%3A%20%22FeatureCollection%22%2C%20%22features%22%3A%20%5B%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.7038%2C%2040.4168%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Traffic%20Accident%20%28Point%29%22%2C%20%22marker-color%22%3A%20%22%23ff0000%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.701%2C%2040.415%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Street%20Market%22%2C%20%22marker-color%22%3A%20%22%2300aa00%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.715%2C%2040.421%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Road%20Block%22%2C%20%22marker-color%22%3A%20%22%2300aa00%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.6912%2C%2040.41%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Police%20Checkpoint%22%2C%20%22marker-color%22%3A%20%22%2300aa00%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.69%2C%2040.412%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Protest%20from%20GeoJSON%22%2C%20%22marker-color%22%3A%20%22%23800080%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.71%2C%2040.42%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Search%20Origin%20%28Radius%20%26%20KNN%29%22%2C%20%22marker-color%22%3A%20%22%23ffa500%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22LineString%22%2C%20%22coordinates%22%3A%20%5B%5B-3.7038%2C%2040.4168%5D%2C%20%5B-3.71%2C%2040.42%5D%2C%20%5B-3.715%2C%2040.425%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Marathon%20Route%20%28Line%29%22%2C%20%22stroke%22%3A%20%22%230000ff%22%2C%20%22stroke-width%22%3A%204%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.7%2C%2040.41%5D%2C%20%5B-3.71%2C%2040.41%5D%2C%20%5B-3.71%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.41%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Restricted%20Zone%20%28Polygon%29%22%2C%20%22fill%22%3A%20%22%23ff0000%22%2C%20%22fill-opacity%22%3A%200.2%2C%20%22stroke%22%3A%20%22%23ff0000%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.705%2C%2040.415%5D%2C%20%5B-3.705%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.415%5D%2C%20%5B-3.705%2C%2040.415%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Search%20Area%20%28Intersects%20Polygon%29%22%2C%20%22fill%22%3A%20%22%23ffa500%22%2C%20%22fill-opacity%22%3A%200.2%2C%20%22stroke%22%3A%20%22%23ffa500%22%7D%7D%5D%7D) showing all the geometries (points, lines, polygons) that will be inserted in this module.
+> 🗺️ **VISUALIZE THE DATA**: [Click here to open an interactive map](http://geojson.io/#data=data:application/json,%7B%22type%22%3A%20%22FeatureCollection%22%2C%20%22features%22%3A%20%5B%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.7038%2C%2040.4168%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Traffic%20Accident%20%28Point%29%22%2C%20%22marker-color%22%3A%20%22%23ff0000%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.701%2C%2040.415%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Street%20Market%22%2C%20%22marker-color%22%3A%20%22%2300aa00%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.715%2C%2040.421%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Road%20Block%22%2C%20%22marker-color%22%3A%20%22%2300aa00%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.6912%2C%2040.41%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Police%20Checkpoint%22%2C%20%22marker-color%22%3A%20%22%2300aa00%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.69%2C%2040.412%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Protest%20from%20GeoJSON%22%2C%20%22marker-color%22%3A%20%22%23800080%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Point%22%2C%20%22coordinates%22%3A%20%5B-3.71%2C%2040.42%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Search%20Origin%20%28Radius%20%26%20KNN%29%22%2C%20%22marker-color%22%3A%20%22%23ffa500%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22LineString%22%2C%20%22coordinates%22%3A%20%5B%5B-3.7038%2C%2040.4168%5D%2C%20%5B-3.71%2C%2040.42%5D%2C%20%5B-3.715%2C%2040.425%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Marathon%20Route%20%28Line%29%22%2C%20%22stroke%22%3A%20%22%230000ff%22%2C%20%22stroke-width%22%3A%204%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.7%2C%2040.41%5D%2C%20%5B-3.71%2C%2040.41%5D%2C%20%5B-3.71%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.41%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Restricted%20Zone%20%28Polygon%29%22%2C%20%22fill%22%3A%20%22%23ff0000%22%2C%20%22fill-opacity%22%3A%200.2%2C%20%22stroke%22%3A%20%22%23ff0000%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.705%2C%2040.415%5D%2C%20%5B-3.705%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.42%5D%2C%20%5B-3.7%2C%2040.415%5D%2C%20%5B-3.705%2C%2040.415%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Search%20Area%20%28Intersects%20Polygon%29%22%2C%20%22fill%22%3A%20%22%23ffa500%22%2C%20%22fill-opacity%22%3A%200.2%2C%20%22stroke%22%3A%20%22%23ffa500%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.708%2C%2040.412%5D%2C%20%5B-3.708%2C%2040.422%5D%2C%20%5B-3.698%2C%2040.422%5D%2C%20%5B-3.698%2C%2040.421%5D%2C%20%5B-3.706%2C%2040.421%5D%2C%20%5B-3.706%2C%2040.412%5D%2C%20%5B-3.708%2C%2040.412%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Complex%20Intersecting%20Zone%22%2C%20%22fill%22%3A%20%22%23800080%22%2C%20%22fill-opacity%22%3A%200.2%2C%20%22stroke%22%3A%20%22%23800080%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.708%2C%2040.412%5D%2C%20%5B-3.708%2C%2040.422%5D%2C%20%5B-3.698%2C%2040.422%5D%2C%20%5B-3.698%2C%2040.412%5D%2C%20%5B-3.708%2C%2040.412%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Bounding%20Box%20%28Complex%20Zone%29%22%2C%20%22fill%22%3A%20%22%23800080%22%2C%20%22fill-opacity%22%3A%200.0%2C%20%22stroke%22%3A%20%22%23800080%22%2C%20%22stroke-dasharray%22%3A%20%225%2C%205%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.675%2C%2040.44%5D%2C%20%5B-3.67%2C%2040.436%5D%2C%20%5B-3.672%2C%2040.43%5D%2C%20%5B-3.678%2C%2040.43%5D%2C%20%5B-3.68%2C%2040.436%5D%2C%20%5B-3.675%2C%2040.44%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Complex%20Intersecting%20Zone%202%22%2C%20%22fill%22%3A%20%22%23008080%22%2C%20%22fill-opacity%22%3A%200.2%2C%20%22stroke%22%3A%20%22%23008080%22%7D%7D%2C%20%7B%22type%22%3A%20%22Feature%22%2C%20%22geometry%22%3A%20%7B%22type%22%3A%20%22Polygon%22%2C%20%22coordinates%22%3A%20%5B%5B%5B-3.68%2C%2040.43%5D%2C%20%5B-3.68%2C%2040.44%5D%2C%20%5B-3.67%2C%2040.44%5D%2C%20%5B-3.67%2C%2040.43%5D%2C%20%5B-3.68%2C%2040.43%5D%5D%5D%7D%2C%20%22properties%22%3A%20%7B%22name%22%3A%20%22Bounding%20Box%20%28Complex%20Zone%202%29%22%2C%20%22fill%22%3A%20%22%23008080%22%2C%20%22fill-opacity%22%3A%200.0%2C%20%22stroke%22%3A%20%22%23008080%22%2C%20%22stroke-dasharray%22%3A%20%225%2C%205%22%7D%7D%5D%7D) showing all the geometries (points, lines, polygons) that will be inserted in this module.
 
 #### A. Real-time Single Ingestion (Points, Lines, Polygons)
 
@@ -464,8 +496,9 @@ ORDER BY
 
 Statement Breakdown:
 
-- `ST_DWithin()`: High-performance spatial function. It automatically utilizes the GiST index to do a fast bounding-box filter before calculating precise distances.
-- `::geography`: **Crucial Cast**. Casting the geometry to geography forces PostGIS to calculate the distance over the spherical curvature of the Earth (resulting in meters).
+- `ST_Distance()`: Calculates the shortest distance between two geometries.
+- `ST_DWithin()`: High-performance spatial function that returns `true` if two geometries are within a specified distance of one another. It automatically utilizes the GiST index to do a fast bounding-box filter before calculating precise distances, making it much faster than using `ST_Distance() < 5000` in a `WHERE` clause.
+- `::geography`: **Crucial Type Cast**. In PostGIS, the `geometry` type calculates distances on a flat Cartesian plane, meaning distances for SRID 4326 (GPS coordinates) would be calculated in *degrees*, which is practically useless. By casting the column to `::geography`, we force PostGIS to calculate the distance over the spherical curvature of the Earth. This ensures that both `ST_Distance` returns the exact distance in **meters**, and that `ST_DWithin` interprets the `5000` parameter as **meters** instead of degrees.
 
 ### 3.4 Spatial Relationships (Intersection & Containment)
 
@@ -507,9 +540,10 @@ PostGIS implements specialized spatial operators that map perfectly to the GiST 
 | `<#>` | Bounding Box Distance | Faster, less precise bounding box distance. | `GIST (geom)` |
 | `&&` | Bounding Box Intersects | Checks if bounding boxes overlap. | `GIST (geom)` |
 
-The standard for Nearest Neighbor in PostGIS is `<->`:
+The standard for Nearest Neighbor in PostGIS is `<->` (precise 2D distance):
 
 ```sql
+-- Query 1: Find the top 3 closest events based on precise 2D distance
 SELECT 
     event_type,
     ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(-3.71, 40.42), 4326)::geography) AS distance_m
@@ -519,6 +553,52 @@ ORDER BY
     geom <-> ST_SetSRID(ST_MakePoint(-3.7100, 40.4200), 4326)
 LIMIT 3;
 ```
+
+For faster, less precise queries (especially useful for massive datasets), you can use the Bounding Box Distance (`<#>`):
+
+```sql
+-- Query 2: Find the top 3 closest events based on Bounding Box distance
+SELECT 
+    event_type,
+    geom <#> ST_SetSRID(ST_MakePoint(-3.7100, 40.4200), 4326) AS bbox_distance_degrees
+FROM 
+    location_events
+ORDER BY 
+    geom <#> ST_SetSRID(ST_MakePoint(-3.7100, 40.4200), 4326)
+LIMIT 3;
+```
+
+> **Note on Units**: The `<#>` operator works on the 2D Cartesian plane of the underlying geometry. Because our geometries use SRID 4326 (longitude/latitude), the resulting distance is returned in **degrees**, not meters. This operator is not supported for the `geography` type.
+
+You can also calculate the Bounding Box Distance between two complex polygons:
+
+```sql
+-- Query 3: Calculate the bounding box distance between the Restricted Zone and the Complex Zones
+SELECT 
+    e2.event_type AS target_polygon,
+    e1.geom <#> e2.geom AS bbox_distance_degrees
+FROM 
+    location_events e1,
+    location_events e2
+WHERE 
+    e1.event_type = 'Restricted Zone (Polygon)'
+    AND e2.event_type LIKE 'Complex Intersecting Zone%';
+```
+
+And to check if bounding boxes overlap (Bounding Box Intersects `&&`), which is much faster than the precise `ST_Intersects` function:
+
+```sql
+-- Query 4: Find events whose bounding box overlaps with our Search Area's bounding box
+SELECT 
+    event_type
+FROM 
+    location_events
+WHERE 
+    geom && ST_SetSRID(ST_GeomFromText('POLYGON((-3.705 40.415, -3.705 40.420, -3.700 40.420, -3.700 40.415, -3.705 40.415))'), 4326)
+    AND event_type != 'Search Area (Intersects Polygon)';
+```
+
+> **Didactic Note**: The "Complex Intersecting Zone" is an L-shaped polygon that wraps around the Search Area without actually touching it. Therefore, it will **not** appear in the results of `ST_Intersects` (precise intersection), but it **will** appear in the results of `&&` because their Bounding Boxes overlap!
 
 ### 3.6 Execution Instructions (Python)
 
@@ -577,6 +657,12 @@ WHERE
     h3_are_neighbor_cells(h3_index, h3_lat_lng_to_cell(point(40.4168, -3.7038), 9))
     OR h3_index = h3_lat_lng_to_cell(point(40.4168, -3.7038), 9);
 ```
+
+Statement Breakdown:
+
+- `h3_lat_lng_to_cell(point(lat, lng), resolution)`: Converts a standard GPS coordinate into its corresponding H3 hexagon ID. We use resolution `9` to match the resolution of the data we inserted. Note that `h3-pg` expects the point in `(latitude, longitude)` order, unlike PostGIS which often expects `(longitude, latitude)`.
+- `h3_are_neighbor_cells(index1, index2)`: This is the core spatial relationship function for H3. It returns `true` if the two hexagons share a boundary (i.e., they are touching). Because H3 uses a grid system, this operation is incredibly fast and avoids complex trigonometric distance calculations.
+- `OR h3_index = ...`: The `h3_are_neighbor_cells` function only checks for *adjacent* hexagons, it returns `false` if you compare a hexagon with itself. Therefore, to find events in the *same* hexagon OR the surrounding ones, we must explicitly include the equality check.
 
 ### 4.4 Execution Instructions (Python)
 

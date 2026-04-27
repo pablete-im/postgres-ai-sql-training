@@ -1,4 +1,6 @@
-event_type,longitude,latitude
-"Street Market",-3.7010,40.4150
-"Road Block",-3.7150,40.4210
-"Police Checkpoint",-3.6912,40.4100
+event_type,wkt
+"Street Market","POINT(-3.7010 40.4150)"
+"Road Block","POINT(-3.7150 40.4210)"
+"Police Checkpoint","POINT(-3.6912 40.4100)"
+"Complex Intersecting Zone","POLYGON((-3.708 40.412, -3.708 40.422, -3.698 40.422, -3.698 40.421, -3.706 40.421, -3.706 40.412, -3.708 40.412))"
+"Complex Intersecting Zone 2","POLYGON((-3.675 40.440, -3.670 40.436, -3.672 40.430, -3.678 40.430, -3.680 40.436, -3.675 40.440))"

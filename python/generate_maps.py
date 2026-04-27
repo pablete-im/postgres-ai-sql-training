@@ -47,10 +47,19 @@ def generate_mod3_url():
 
     # Load Polygons
     for poly in data.get("polygons", []):
+        props = {
+            "name": poly["name"], 
+            "fill": poly.get("color", "#ff0000"), 
+            "fill-opacity": poly.get("fill-opacity", 0.2), 
+            "stroke": poly.get("stroke-color", poly.get("color", "#ff0000"))
+        }
+        if "stroke-dasharray" in poly:
+            props["stroke-dasharray"] = poly["stroke-dasharray"]
+            
         geojson["features"].append({
             "type": "Feature",
             "geometry": {"type": "Polygon", "coordinates": poly["coordinates"]},
-            "properties": {"name": poly["name"], "fill": poly.get("color", "#ff0000"), "fill-opacity": 0.2, "stroke": poly.get("color", "#ff0000")}
+            "properties": props
         })
 
     return "http://geojson.io/#data=data:application/json," + urllib.parse.quote(json.dumps(geojson))

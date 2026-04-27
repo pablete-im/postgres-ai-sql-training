@@ -43,8 +43,7 @@ def setup():
     q3 = """
     CREATE TABLE IF NOT EXISTS multimodal.staging_events (
         event_type TEXT,
-        longitude FLOAT,
-        latitude FLOAT
+        wkt TEXT
     );
     """
     
@@ -103,12 +102,12 @@ def load_data_b():
     
     csv_path = os.path.join(os.path.dirname(__file__), 'data.csv')
     
-    q1 = "COPY multimodal.staging_events (event_type, longitude, latitude) FROM '/path/to/data.csv' WITH (FORMAT csv, HEADER true);"
+    q1 = "COPY multimodal.staging_events (event_type, wkt) FROM '/path/to/data.csv' WITH (FORMAT csv, HEADER true);"
     q2 = """
     INSERT INTO multimodal.location_events (event_type, geom)
     SELECT 
         event_type, 
-        ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+        ST_SetSRID(ST_GeomFromText(wkt), 4326)
     FROM multimodal.staging_events;
     """
     
@@ -117,7 +116,7 @@ def load_data_b():
     # Step 1: Load into staging table
     cur.execute("TRUNCATE multimodal.staging_events;")
     with open(csv_path, 'r') as f:
-        cur.copy_expert("COPY multimodal.staging_events (event_type, longitude, latitude) FROM STDIN WITH (FORMAT csv, HEADER true)", f)
+        cur.copy_expert("COPY multimodal.staging_events (event_type, wkt) FROM STDIN WITH (FORMAT csv, HEADER true)", f)
     
     # Step 2: Bulk insert with Geometry transformation
     # cur.execute("TRUNCATE multimodal.location_events;")
@@ -267,6 +266,28 @@ def query_spatial_distances():
     LIMIT 3;
     """
     
+    q_bbox_intersect = """
+    SELECT 
+        event_type
+    FROM 
+        multimodal.location_events
+    WHERE 
+        geom && ST_SetSRID(ST_GeomFromText('POLYGON((-3.705 40.415, -3.705 40.420, -3.700 40.420, -3.700 40.415, -3.705 40.415))'), 4326)
+        AND event_type != 'Search Area (Intersects Polygon)';
+    """
+    
+    q_bbox_poly = """
+    SELECT 
+        e2.event_type AS target_polygon,
+        e1.geom <#> e2.geom AS bbox_distance_degrees
+    FROM 
+        multimodal.location_events e1,
+        multimodal.location_events e2
+    WHERE 
+        e1.event_type = 'Restricted Zone (Polygon)'
+        AND e2.event_type LIKE 'Complex Intersecting Zone%';
+    """
+    
     print_step("Query 1: Spatial KNN Search (2D Distance <->)", q_knn, description="Find the top 3 closest events to the search origin based on precise 2D distance")
     cur.execute(q_knn)
     print("--- 🎯 RESULTS (Closest 3 by precise distance) ---")
@@ -280,13 +301,27 @@ def query_spatial_distances():
     for row in cur.fetchall():
         print(f"Event: {row[0]:<20} | BBox Dist: {row[1]:.4f}")
     prompt_manual_test(q_bbox.strip())
+
+    print_step("Query 3: Bounding Box Distance between Polygons (<#>)", q_bbox_poly, description="Calculate the bounding box distance between the Restricted Zone and the Complex Zones")
+    cur.execute(q_bbox_poly)
+    print("--- 🎯 RESULTS (BBox distance between polygons) ---")
+    for row in cur.fetchall():
+        print(f"Target: {row[0]:<30} | BBox Dist: {row[1]:.4f}")
+    prompt_manual_test(q_bbox_poly.strip())
+
+    print_step("Query 4: Bounding Box Intersects (&&)", q_bbox_intersect, description="Find events whose bounding box overlaps with the Search Area's bounding box")
+    cur.execute(q_bbox_intersect)
+    print("--- 🎯 RESULTS (Events with overlapping Bounding Boxes) ---")
+    for row in cur.fetchall():
+        print(f"Event: {row[0]:<30}")
+    prompt_manual_test(q_bbox_intersect.strip())
         
     cur.close()
     conn.close()
 
 if __name__ == "__main__":
     print("\n" + "="*80)
-    print("🚀 EXECUTING MODULE 2: Geospatial Search (PostGIS)")
+    print("🚀 EXECUTING MODULE 3: Geospatial Search (PostGIS)")
     print("="*80)
     setup()
     load_data_a()

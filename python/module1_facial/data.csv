@@ -1,4 +1,4 @@
-person_name,s3_url,embedding
-"Bob Jones","s3://bucket/faces/bob.jpg","[-0.051,0.088,0.201]"
-"Charlie Doe","s3://bucket/faces/charlie.jpg","[0.005,0.011,-0.099]"
-"Diana Prince","s3://bucket/faces/diana.jpg","[0.022,-0.015,0.155]"
+person_name,metadata,s3_url,embedding
+"Bob Jones","{""role"": ""employee"", ""department"": ""HR""}","s3://bucket/faces/bob.jpg","[-0.051,0.088,0.201]"
+"Charlie Doe","{""role"": ""contractor"", ""department"": ""Facilities""}","s3://bucket/faces/charlie.jpg","[0.005,0.011,-0.099]"
+"Diana Prince","{""role"": ""admin"", ""department"": ""IT""}","s3://bucket/faces/diana.jpg","[0.022,-0.015,0.155]"
