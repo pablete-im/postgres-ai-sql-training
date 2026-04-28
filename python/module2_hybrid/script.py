@@ -31,7 +31,7 @@ def setup():
         media_id UUID PRIMARY KEY,
         start_timestamp INTERVAL,
         raw_text TEXT,
-        text_search tsvector GENERATED ALWAYS AS (to_tsvector('english', raw_text)) STORED,
+        text_search tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(raw_text, ''))) STORED,
         semantic_embedding vector(3) -- Using 3 dimensions for demo instead of 1536
     );
     """

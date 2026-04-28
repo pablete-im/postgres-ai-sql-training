@@ -36,7 +36,7 @@ While standard `INSERT` statements are fine for real-time inference (e.g., a use
 INSERT INTO facial_embeddings (person_name, metadata, s3_url, embedding) 
 VALUES (
     'Alice Smith', 
-    '{"role": "admin", "department": "security"}',
+    '{"role": "admin", "department": "security"}'::jsonb,
     's3://bucket/faces/alice.jpg', 
     '[0.012, -0.045, 0.123, ...]' -- Array of 512 floats
 );
@@ -214,7 +214,7 @@ CREATE TABLE multimedia_transcripts (
     raw_text TEXT,
     
     -- 1. Lexical: Auto-generated TSVECTOR for Full Text Search
-    text_search tsvector GENERATED ALWAYS AS (to_tsvector('english', raw_text)) STORED,
+    text_search tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(raw_text, ''))) STORED,
     
     -- 2. Semantic: PGVector embedding (e.g., OpenAI text-embedding-3-small: 1536 dims)
     semantic_embedding vector(1536)
@@ -230,6 +230,14 @@ CREATE INDEX transcript_vector_cosine_idx ON multimedia_transcripts USING hnsw (
 -- Highly recommended for normalized embeddings (like OpenAI text-embedding-3)
 CREATE INDEX transcript_vector_ip_idx ON multimedia_transcripts USING hnsw (semantic_embedding vector_ip_ops);
 ```
+
+Statement Breakdown & Key Concepts:
+
+- `tsvector`: A specialized PostgreSQL data type for Full Text Search. It stores a pre-processed, optimized list of words (lexemes) extracted from a document, ignoring stop words (like "the", "a", "is") and converting words to their root form (e.g., "running" becomes "run").
+- `GENERATED ALWAYS AS (...) STORED`: This is a powerful feature (introduced in Postgres 12). It automatically calculates the `tsvector` value whenever a row is inserted or updated, and physically stores it on disk (`STORED`). You never have to manually update this column; Postgres handles it transparently.
+- `to_tsvector('english', ...)`: The function that actually parses the raw text into the `tsvector` format, applying English language rules for stemming and stop words.
+- `coalesce(raw_text, '')`: A safety measure. If `raw_text` is `NULL`, `to_tsvector` would fail or return `NULL`. `coalesce` replaces `NULL` with an empty string `''`, ensuring the vector generation always succeeds. In tables with multiple text columns (e.g., `title` and `body`), you often see them concatenated like `coalesce(title,'') || ' ' || coalesce(body,'')`.
+- `USING GIN (text_search)`: Creates a Generalized Inverted Index. This is the engine behind fast Full Text Search, mapping every unique word to the rows where it appears, allowing instant lookups even in massive datasets.
 
 ### 2.2 Data Ingestion & Upserting (Model Upgrades)
 

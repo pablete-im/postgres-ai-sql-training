@@ -74,7 +74,7 @@ def load_data_a():
     
     q = """
     INSERT INTO multimodal.facial_embeddings (person_name, metadata, s3_url, embedding) 
-    VALUES ('Alice Smith', '{"role": "admin", "department": "security"}', 's3://bucket/faces/alice.jpg', '[0.012, -0.045, 0.123]')
+    VALUES ('Alice Smith', '{"role": "admin", "department": "security"}'::jsonb, 's3://bucket/faces/alice.jpg', '[0.012, -0.045, 0.123]')
     ON CONFLICT DO NOTHING;
     """
     
