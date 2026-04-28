@@ -287,8 +287,14 @@ LIMIT 10;
 
 Statement Breakdown:
 
-- `to_tsquery('invoice | payment')`: Compiles a search query looking for either the root of "invoice" OR "payment".
-- `@@`: The Full Text Search match operator. The GIN index handles this instantly.
+- `to_tsquery('english', 'invoice | payment')`: Converts the search string into a normalized `tsquery` object. It understands boolean operators (`|` for OR, `&` for AND, `!` for NOT) and the phrase operator (`<->` for FOLLOWED BY). It also stems the words (e.g., searching for "payments" will match "payment").
+  - *Other relevant operators*: 
+    - `<->` (Phrase Operator): Finds words that appear exactly adjacent to each other in the text. For example, `to_tsquery('credit <-> card')` will match "credit card" but won't match "credit for the card". You can also specify distance: `<2>` means exactly 2 words apart.
+    - `plainto_tsquery()`: Treats the entire input as a single literal string (ignores boolean operators). Good for raw user input.
+    - `websearch_to_tsquery()`: Understands Google-like syntax (e.g., `"exact phrase" -exclude`). Highly recommended for user-facing search bars.
+- `@@`: The Full Text Search match operator. It evaluates if the `tsvector` (the document) matches the `tsquery` (the search terms). The GIN index handles this instantly.
+- `ts_rank()`: Calculates a relevance score (rank) based on how often the search terms appear in the document. 
+  - *Other relevant operators*: `ts_rank_cd()` calculates the score based on the proximity of the matching words (Cover Density), which is useful if you want words that appear close together to score higher.
 
 ### 2.4 Pure Semantic Query
 
@@ -307,6 +313,11 @@ SELECT media_id, start_timestamp, raw_text,
 FROM multimedia_transcripts
 ORDER BY semantic_embedding <#> '[0.01, -0.05, ...]' LIMIT 10;
 ```
+
+Statement Breakdown:
+
+- `<=>` (Cosine Distance): Calculates the angular distance between two vectors. The result is between 0 (identical) and 2 (completely opposite). We use `1 - distance` to convert this into a more intuitive "Similarity Score" where 1.0 is a perfect match.
+- `<#>` (Negative Inner Product): Calculates the inner product. `pgvector` returns this as a negative number so that `ORDER BY ... ASC` works correctly (Postgres indexes only support ascending order natively for nearest neighbor). We multiply by `-1` to get the true positive inner product score.
 
 ### 2.5 Hybrid Search: The Ultimate Query (Score Fusion)
 
@@ -358,9 +369,10 @@ LIMIT 10;
 
 Statement Breakdown & Architectural Importance:
 
-- `WITH ...`: Defines two isolated temporary result sets. Postgres can execute these sub-queries highly efficiently using their respective indexes (HNSW for semantic, GIN for lexical).
+- `WITH ...`: Defines two isolated temporary result sets (CTEs). Postgres can execute these sub-queries highly efficiently using their respective indexes (HNSW for semantic, GIN for lexical).
 - `LIMIT 50`: A critical parameter for performance. You don't fuse the entire database; you only fuse the top 50 results from each search method to save CPU cycles.
-- `FULL OUTER JOIN`: Merges the two sets based on the `media_id`.
+- `FULL OUTER JOIN`: Merges the two sets based on the `media_id`, ensuring we don't lose documents that scored high in one method but didn't appear in the other.
+- `COALESCE()`: Handles `NULL` values. If a document was found by Semantic search but not Lexical, its Lexical score will be `NULL`. `COALESCE` converts that `NULL` to `0` so the math doesn't break.
 - `(Score * Weight)`: The final ranking mechanism. You assign weights depending on the use case (e.g., in legal document search, you might give 80% to Lexical; in conversational chatbots, 80% to Semantic).
 
 ### 2.6 Execution Instructions (Python)
