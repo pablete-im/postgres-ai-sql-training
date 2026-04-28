@@ -1,40 +1,118 @@
 ---
-- name: Install PostgreSQL 18 Server and Extensions
+- name: Install PostgreSQL Server and Extensions
   hosts: postgres_server
   become: yes
 
   tasks:
-    - name: Install PostgreSQL PGDG repository
+    - name: Set OS-specific variables for RedHat
+      set_fact:
+        pg_data_dir: "/var/lib/pgsql/{{ postgresql.version }}/data"
+        pg_conf_dir: "/var/lib/pgsql/{{ postgresql.version }}/data"
+        pg_service: "postgresql-{{ postgresql.version }}"
+        pg_packages:
+          - "postgresql{{ postgresql.version }}-server"
+          - "postgresql{{ postgresql.version }}"
+          - "postgresql{{ postgresql.version }}-contrib"
+        pg_ext_packages:
+          - "postgis35_{{ postgresql.version }}"
+          - "pgvector_{{ postgresql.version }}"
+          - "h3-pg_{{ postgresql.version }}"
+      when: ansible_os_family == 'RedHat'
+
+    - name: Set OS-specific variables for Debian
+      set_fact:
+        pg_data_dir: "/var/lib/postgresql/{{ postgresql.version }}/main"
+        pg_conf_dir: "/etc/postgresql/{{ postgresql.version }}/main"
+        pg_service: "postgresql"
+        pg_packages:
+          - "postgresql-{{ postgresql.version }}"
+          - "postgresql-contrib"
+        pg_ext_packages:
+          - "postgresql-{{ postgresql.version }}-postgis-3"
+          - "postgresql-{{ postgresql.version }}-pgvector"
+          - "postgresql-{{ postgresql.version }}-h3-pg"
+      when: ansible_os_family == 'Debian'
+
+    # --- RedHat Repository Setup ---
+    - name: Install PostgreSQL PGDG repository (RedHat)
       dnf:
         name: https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
         state: present
         disable_gpg_check: yes
+      when: ansible_os_family == 'RedHat'
 
-    - name: Disable built-in PostgreSQL module to use PGDG packages
+    - name: Disable built-in PostgreSQL module to use PGDG packages (RedHat)
       command: dnf -qy module disable postgresql
       register: disable_pg_module
       changed_when: disable_pg_module.rc == 0
+      when: ansible_os_family == 'RedHat'
 
-    - name: Install PostgreSQL {{ postgresql.version }} server and contrib
+    - name: Install EPEL repository (RedHat)
       dnf:
-        name:
-          - postgresql{{ postgresql.version }}-server
-          - postgresql{{ postgresql.version }}
-          - postgresql{{ postgresql.version }}-contrib
+        name: epel-release
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Enable CRB repository (CodeReady Builder) (RedHat)
+      command: dnf config-manager --set-enabled crb
+      ignore_errors: yes
+      register: crb_enable
+      changed_when: crb_enable.rc == 0
+      when: ansible_os_family == 'RedHat'
+
+    # --- Debian Repository Setup ---
+    - name: Install prerequisite packages (Debian)
+      apt:
+        name: 
+          - acl
+          - curl
+          - gnupg2
+          - ca-certificates
+        state: present
+        update_cache: yes
+      when: ansible_os_family == 'Debian'
+
+    - name: Download PostgreSQL apt key (Debian)
+      get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: /etc/apt/trusted.gpg.d/postgresql.asc
+      when: ansible_os_family == 'Debian'
+
+    - name: Add PostgreSQL apt repository (Debian)
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/postgresql.asc] http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+        state: present
+        filename: pgdg
+      when: ansible_os_family == 'Debian'
+
+    # --- Installation ---
+    - name: Install PostgreSQL server and contrib packages
+      package:
+        name: "{{ pg_packages }}"
+        state: present
+        update_cache: "{{ 'yes' if ansible_os_family == 'Debian' else 'no' }}"
+
+    - name: Install PostGIS, pgvector, and h3 extensions packages
+      package:
+        name: "{{ pg_ext_packages }}"
         state: present
 
+    # --- Initialization ---
     - name: Check if PostgreSQL is initialized
       stat:
-        path: /var/lib/pgsql/{{ postgresql.version }}/data/PG_VERSION
+        path: "{{ pg_data_dir }}/PG_VERSION"
       register: pg_data
 
-    - name: Initialize PostgreSQL database
+    - name: Initialize PostgreSQL database (RedHat)
       command: /usr/pgsql-{{ postgresql.version }}/bin/postgresql-{{ postgresql.version }}-setup initdb
-      when: not pg_data.stat.exists
+      when: ansible_os_family == 'RedHat' and not pg_data.stat.exists
 
+    # Note: Debian initializes the main cluster automatically upon installation.
+    
+    # --- Configuration ---
     - name: Configure PostgreSQL to listen on all addresses
       lineinfile:
-        path: /var/lib/pgsql/{{ postgresql.version }}/data/postgresql.conf
+        path: "{{ pg_conf_dir }}/postgresql.conf"
         regexp: "^#?listen_addresses\\s*=.*"
         line: "listen_addresses = '{{ postgresql.listen_addresses }}'"
         state: present
@@ -42,7 +120,7 @@
 
     - name: Configure pg_hba.conf to allow remote connections
       lineinfile:
-        path: /var/lib/pgsql/{{ postgresql.version }}/data/pg_hba.conf
+        path: "{{ pg_conf_dir }}/pg_hba.conf"
         line: "host    all             all             {{ postgresql.allowed_remote_cidr }}           {{ postgresql.auth_method }}"
         insertafter: EOF
         state: present
@@ -50,39 +128,21 @@
 
     - name: Start and enable PostgreSQL service
       systemd:
-        name: postgresql-{{ postgresql.version }}
+        name: "{{ pg_service }}"
         state: started
         enabled: yes
 
     - name: Restart PostgreSQL if configuration changed
       systemd:
-        name: postgresql-{{ postgresql.version }}
+        name: "{{ pg_service }}"
         state: restarted
       when: pg_conf.changed or pg_hba.changed
 
+    # --- Post-Install DB Config ---
     - name: Set postgres admin password
       become_user: postgres
       command: psql -c "ALTER USER {{ postgresql.admin_user }} WITH PASSWORD '{{ vault_pg_admin_password }}';"
       changed_when: false
-
-    - name: Install EPEL repository
-      dnf:
-        name: epel-release
-        state: present
-
-    - name: Enable CRB repository (CodeReady Builder, required for some PostGIS dependencies)
-      command: dnf config-manager --set-enabled crb
-      ignore_errors: yes
-      register: crb_enable
-      changed_when: crb_enable.rc == 0
-
-    - name: Install PostGIS, pgvector, and h3 packages
-      dnf:
-        name:
-          - postgis35_{{ postgresql.version }}
-          - pgvector_{{ postgresql.version }}
-          - h3-pg_{{ postgresql.version }}
-        state: present
 
     - name: Ensure the database exists for the extensions
       become_user: postgres
