@@ -122,7 +122,26 @@ def query_lexical():
     print("--- 🎯 RESULTS ---")
     for row in cur.fetchall():
         print(f"ID: {str(row[0])[:8]}... | Rank: {row[3]:.4f} | Text: '{row[2]}'")
-    prompt_manual_test(q.strip())
+        
+    manual_tests = f"""{q.strip()}
+
+-- 🧪 TEST FTS FUNCTIONS MANUALLY:
+-- 1. Test to_tsvector (Notice how words are stemmed and stop words removed):
+SELECT to_tsvector('english', 'We have a payment issue and the invoice was cancelled.');
+
+-- 2. Test to_tsquery (Boolean operators and stemming):
+SELECT to_tsquery('english', '''online payments'' & !cancelled');
+
+-- 3. Test plainto_tsquery (Treats input as a literal string, ignoring boolean operators):
+SESELECT plainto_tsquery('english', '''online payments'' | !cancelled');
+
+-- 4. Test phraseto_tsquery (Forces exact word sequence using the <-> phrase operator):
+SELECT phraseto_tsquery('english', '''online payments'' with or any | !cancelled');
+
+-- 5. Test websearch_to_tsquery (Google-like syntax: exact phrase and exclusion):
+SELECT websearch_to_tsquery('english', '"payment issue" or "payment error" -invoice');"""
+
+    prompt_manual_test(manual_tests)
     cur.close()
     conn.close()
 
@@ -222,13 +241,63 @@ def query_hybrid():
     cur.close()
     conn.close()
 
+def query_hybrid_rrf():
+    """2.6 Hybrid Search: The Ultimate Query (RRF)"""
+    conn = get_connection()
+    cur = conn.cursor()
+    
+    q = """
+    WITH semantic_search AS (
+        SELECT 
+            media_id, 
+            raw_text,
+            start_timestamp,
+            row_number() OVER (ORDER BY semantic_embedding <=> '[0.01, -0.05, 0.1]') as semantic_rank
+        FROM multimodal.multimedia_transcripts
+        ORDER BY semantic_embedding <=> '[0.01, -0.05, 0.1]' 
+        LIMIT 50
+    ), 
+    lexical_search AS (
+        SELECT 
+            media_id, 
+            raw_text,
+            start_timestamp,
+            row_number() OVER (ORDER BY ts_rank(text_search, to_tsquery('english','invoice | payment')) DESC) AS lexical_rank
+        FROM multimodal.multimedia_transcripts
+        WHERE text_search @@ to_tsquery('english', 'invoice | payment')
+        ORDER BY ts_rank(text_search, to_tsquery('english','invoice | payment')) DESC
+        LIMIT 50
+    )
+    -- Join and calculate final weighted score using RRF
+    SELECT 
+        COALESCE(s.media_id, l.media_id) AS media_id,
+        COALESCE(s.raw_text, l.raw_text) AS raw_text,
+        COALESCE(s.start_timestamp, l.start_timestamp) AS start_timestamp,
+        COALESCE(1.0 / (60 + s.semantic_rank), 0.0) + COALESCE(1.0 / (60 + l.lexical_rank), 0.0) AS final_rrf_score
+    FROM semantic_search s
+    FULL OUTER JOIN lexical_search l ON s.media_id = l.media_id
+    ORDER BY final_rrf_score DESC 
+    LIMIT 10;
+    """
+    
+    print_step("Hybrid Search: Reciprocal Rank Fusion (RRF)", q, description="Combine Lexical and Semantic results using their relative ranks instead of raw scores")
+    cur.execute(q)
+    
+    print("--- 🎯 RRF RESULTS ---")
+    for row in cur.fetchall():
+        print(f"ID: {str(row[0])[:8]}... | RRF Score: {row[3]:.4f} | Text: '{row[1]}'")
+    prompt_manual_test(q.strip())
+    cur.close()
+    conn.close()
+
 if __name__ == "__main__":
     print("\n" + "="*80)
-    print("🚀 EXECUTING MODULE 3: Hybrid Search (Audio / Video Transcripts & PDFs)")
+    print("🚀 EXECUTING MODULE 2: Hybrid Search (Audio / Video Transcripts & PDFs)")
     print("="*80)
     setup()
     load_data()
     query_lexical()
     query_semantic()
     query_hybrid()
+    query_hybrid_rrf()
     print("\n🎉 Module 2 execution finished.\n")

@@ -51,7 +51,7 @@ def setup():
     """
     q5 = """
     CREATE INDEX IF NOT EXISTS facial_metadata_idx 
-    ON multimodal.facial_embeddings USING GIN (metadata);
+    ON multimodal.facial_embeddings USING GIN (metadata jsonb_ops);
     """
     
     print_step("Creating Schema, Table, and Multiple HNSW Indexes", q1 + "\n" + q2 + "\n" + q3 + "\n" + q4 + "\n" + q5)

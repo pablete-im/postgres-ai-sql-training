@@ -176,14 +176,20 @@ WITH (m = 16, ef_construction = 64);
 
 -- Index for JSONB Metadata filtering
 CREATE INDEX facial_metadata_idx 
-ON facial_embeddings USING GIN (metadata);
+ON facial_embeddings USING GIN (metadata jsonb_ops);
 ```
 
 Detailed Index Explanation:
 
 - `USING hnsw`: Creates a Hierarchical Navigable Small World graph, which is currently the state-of-the-art algorithm for fast approximate nearest neighbor (ANN) searches.
 - `vector_cosine_ops`: Crucial parameter. You must specify the operator class that matches your query ( `<=>` needs `vector_cosine_ops`, `<->` needs `vector_l2_ops`).
-- `USING GIN`: Generalized Inverted Index. Essential for querying inside `JSONB` objects (e.g., using the `@>` containment operator). It indexes every key and value inside the JSON document, allowing PostgreSQL to instantly find rows matching specific metadata criteria without scanning the whole table.
+- `USING GIN`: Generalized Inverted Index. Essential for querying inside `JSONB` objects. By default, this uses the `jsonb_ops` operator class (equivalent to `USING GIN (metadata jsonb_ops)`). It indexes every key and value inside the JSON document, allowing PostgreSQL to instantly find rows matching specific metadata criteria without scanning the whole table.
+  - *Default Operator Class (`jsonb_ops`)*: Supports the following operators:
+    - `@>` (Contains): Finds documents containing a specific key-value pair or structure (e.g., `metadata @> '{"role": "admin"}'`). This is the most common and powerful operator for metadata filtering.
+    - `?` (Exists): Checks if a specific top-level key exists in the JSON document (e.g., `metadata ? 'department'`).
+    - `?|` (Exists Any): Checks if *any* of the specified keys exist in the document (e.g., `metadata ?| array['role', 'title']`).
+    - `?&` (Exists All): Checks if *all* of the specified keys exist in the document (e.g., `metadata ?& array['role', 'department']`).
+  - *Alternative Operator Class (`jsonb_path_ops`)*: If you only need the `@>` (Contains) operator, you can create the index as `USING GIN (metadata jsonb_path_ops)`. This creates a significantly smaller and faster index because it only indexes the paths and values, but it drops support for the `?`, `?|`, and `?&` key-existence operators.
 
 ### 1.6 Execution Instructions (Python)
 
@@ -258,11 +264,14 @@ media_id,start_timestamp,raw_text,semantic_embedding
 
 Execution Command (Upsert / ON CONFLICT):
 
+> **Why use a temporary table?** The `COPY` command is designed for incredibly fast bulk data loading, but it is "dumb" regarding conflicts: it does not support the `ON CONFLICT DO UPDATE` clause. If a single primary key violation occurs during a `COPY`, the entire transaction fails. To solve this, the standard PostgreSQL pattern is to `COPY` the data into an empty temporary table (which guarantees no conflicts and is extremely fast), and then use a standard `INSERT INTO ... SELECT ... ON CONFLICT DO UPDATE` to merge the data from the temp table into the main table.
+
 ```sql
 -- Creating a temporary table for the mass upload
+-- LIKE ... INCLUDING ALL ensures the temp table has the exact same structure and data types
 CREATE TEMP TABLE tmp_transcripts (LIKE multimedia_transcripts INCLUDING ALL);
 
--- Load data rapidly into the temp table
+-- Load data rapidly into the empty temp table (No conflicts possible)
 COPY tmp_transcripts (media_id, start_timestamp, raw_text, semantic_embedding) 
 FROM '/path/transcripts_v2.csv' WITH (FORMAT csv, HEADER true);
 
@@ -299,6 +308,7 @@ Statement Breakdown:
   - *Other relevant operators*: 
     - `<->` (Phrase Operator): Finds words that appear exactly adjacent to each other in the text. For example, `to_tsquery('credit <-> card')` will match "credit card" but won't match "credit for the card". You can also specify distance: `<2>` means exactly 2 words apart.
     - `plainto_tsquery()`: Treats the entire input as a single literal string (ignores boolean operators). Good for raw user input.
+    - `phraseto_tsquery()`: Forces the exact word sequence by automatically inserting the `<->` phrase operator between words. Also, stop words are not simply discarded, but are accounted for by inserting <N> operators rather than <-> operators. For example, `phraseto_tsquery('the payment had an issue')` becomes `'payment' <3> 'issu'`.
     - `websearch_to_tsquery()`: Understands Google-like syntax (e.g., `"exact phrase" -exclude`). Highly recommended for user-facing search bars.
 - `@@`: The Full Text Search match operator. It evaluates if the `tsvector` (the document) matches the `tsquery` (the search terms). The GIN index handles this instantly.
 - `ts_rank()`: Calculates a relevance score (rank) based on how often the search terms appear in the document. 
@@ -383,7 +393,46 @@ Statement Breakdown & Architectural Importance:
 - `COALESCE()`: Handles `NULL` values. If a document was found by Semantic search but not Lexical, its Lexical score will be `NULL`. `COALESCE` converts that `NULL` to `0` so the math doesn't break.
 - `(Score * Weight)`: The final ranking mechanism. You assign weights depending on the use case (e.g., in legal document search, you might give 80% to Lexical; in conversational chatbots, 80% to Semantic).
 
-### 2.6 Execution Instructions (Python)
+### 2.6 Hybrid Search: The Ultimate Query (RRF)
+
+While Score Fusion (Section 2.5) works well, it has a major drawback: you are combining raw scores from completely different algorithms. Cosine Distance produces scores between 0 and 1, while `ts_rank` can produce arbitrary positive numbers. Finding the perfect normalization and weights (e.g., 0.7 vs 0.3) is extremely difficult and highly dependent on the dataset.
+
+**Reciprocal Rank Fusion (RRF)** solves this by ignoring the raw scores entirely and focusing only on the *rank* (position) of the document in each search result. The formula is `1 / (k + rank)`, where `k` is a smoothing constant (usually 60).
+
+```sql
+WITH semantic_search AS (
+    SELECT 
+        media_id, 
+        row_number() OVER (ORDER BY semantic_embedding <=> '[0.01, -0.05, 0.1]') as semantic_rank
+    FROM multimodal.multimedia_transcripts
+    ORDER BY semantic_embedding <=> '[0.01, -0.05, 0.1]' 
+    LIMIT 50
+), 
+lexical_search AS (
+    SELECT 
+        media_id, 
+        row_number() OVER (ORDER BY ts_rank(text_search, to_tsquery('english','invoice | payment')) DESC) AS lexical_rank
+    FROM multimodal.multimedia_transcripts
+    WHERE text_search @@ to_tsquery('english', 'invoice | payment')
+    ORDER BY ts_rank(text_search, to_tsquery('english','invoice | payment')) DESC
+    LIMIT 50
+)
+-- Join and calculate final weighted score using RRF
+SELECT 
+    COALESCE(s.media_id, l.media_id) AS media_id,
+    COALESCE(1.0 / (60 + s.semantic_rank), 0.0) + COALESCE(1.0 / (60 + l.lexical_rank), 0.0) AS final_rrf_score
+FROM semantic_search s
+FULL OUTER JOIN lexical_search l ON s.media_id = l.media_id
+ORDER BY final_rrf_score DESC 
+LIMIT 10;
+```
+
+**Why RRF is preferred in production:**
+- **No normalization needed**: You don't have to worry about the scale of the scores.
+- **Highly robust**: It consistently yields excellent results across different datasets without tuning weights.
+- **Mathematically elegant**: A document that appears at rank 1 in both searches will get a very high score, while a document that appears at rank 50 in both will get a much lower score.
+
+### 2.7 Execution Instructions (Python)
 
 To run the complete pipeline for the Hybrid Search module (creating GIN/HNSW indexes, upserting data, and score fusion queries), use the provided Python script.
 
