@@ -507,10 +507,11 @@ If you receive coordinates in a CSV, copy them to a staging table and process th
 Example File (`events_batch.csv`):
 
 ```csv
-event_type,longitude,latitude
-"Street Market",-3.7010,40.4150
-"Road Block",-3.7150,40.4210
-"Police Checkpoint",-3.6912,40.4100
+event_type,wkt
+"Street Market","POINT(-3.701 40.415)"
+"Road Block","POINT(-3.715 40.421)"
+"Police Checkpoint","POINT(-3.6912 40.41)"
+"Complex Intersecting Zone","POLYGON((-3.708 40.412, -3.708 40.422, -3.698 40.422, -3.698 40.421, -3.706 40.421, -3.706 40.412, -3.708 40.412))"
 ```
 
 Execution Command:
@@ -519,27 +520,28 @@ Execution Command:
 -- 1. Create the staging table (if it doesn't exist)
 CREATE TABLE IF NOT EXISTS staging_events (
     event_type TEXT,
-    longitude FLOAT,
-    latitude FLOAT
+    wkt TEXT
 );
 
 -- 2. Load into the staging table
-COPY staging_events (event_type, longitude, latitude) FROM '/path/events_batch.csv' CSV HEADER;
+COPY staging_events (event_type, wkt) FROM '/path/events_batch.csv' CSV HEADER;
 
 -- 3. Bulk insert with Geometry transformation
 INSERT INTO location_events (event_type, geom)
 SELECT 
     event_type, 
-    ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+    ST_SetSRID(ST_GeomFromText(wkt), 4326)
 FROM staging_events;
 ```
 
 #### C. The Professional Toolset: `ogr2ogr`
 
-For complex geometries (like Polygons) stored in GeoJSON, the industry standard is to use the GDAL utility ogr2ogr directly from your server's terminal:
+For complex geometries (like Polygons) stored in GeoJSON, the industry standard is to use the GDAL utility `ogr2ogr` directly from your server's terminal. 
+
+> **How does it map columns?** `ogr2ogr` is incredibly smart. It automatically reads the `"properties"` block of the GeoJSON and maps them to columns with the same name in your PostgreSQL table (e.g., `"event_type"` maps to the `event_type` column). For the geometry itself, PostGIS tables typically have a single geometry column (often named `geom` or `wkb_geometry`). `ogr2ogr` automatically detects this spatial column in the target table and inserts the GeoJSON `"geometry"` object into it, converting it to the correct PostGIS binary format on the fly.
 
 ```bash
-# This automatically reads the GeoJSON, creates the table structure, and imports all data
+# This automatically reads the GeoJSON, maps properties to columns, and imports all data
 ogr2ogr -f "PostgreSQL" PG:"dbname=mydb user=myuser" events_data.geojson -nln location_events -append
 ```
 
