@@ -30,7 +30,7 @@
         pg_ext_packages:
           - "postgresql-{{ postgresql.version }}-postgis-3"
           - "postgresql-{{ postgresql.version }}-pgvector"
-          - "postgresql-{{ postgresql.version }}-h3-pg"
+          - "postgresql-{{ postgresql.version }}-h3"
       when: ansible_os_family == 'Debian'
 
     # --- RedHat Repository Setup ---
